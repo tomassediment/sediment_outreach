@@ -47,7 +47,7 @@ def batch_for_outreach(
                 AND oi.tipo = 'primer_contacto'
                 AND oi.estado != 'cancelado'
           )
-        ORDER BY (lb.score + COALESCE(lb.stack_score, 0)) DESC
+        ORDER BY COALESCE(lb.stack_score, 0) DESC
         LIMIT %s
         """,
         (vertical, min_score, limit * 2)  # buscar el doble para tener buffer de validación

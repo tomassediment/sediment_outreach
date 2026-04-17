@@ -1,13 +1,20 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel
 
 from config import get_settings
-from database import fetch_one, execute
+from database import fetch_one, fetch_all, execute
 from models.outreach import PrepareRequest, PrepareResponse, CascadeRequest, CascadeResponse
 from services.email_validator import build_email_cascade
 from services.matrix_selector import get_message, increment_sent
 from services.email_builder import build_email, build_subject
 from services.cascade_service import get_next_email
+
+
+class MarkSentRequest(BaseModel):
+    intento_id: int
+    instantly_id: str
 
 router = APIRouter()
 settings = get_settings()
@@ -114,6 +121,74 @@ def prepare_outreach(req: PrepareRequest):
         programado_para=send_at,
         is_dry_run=IS_DEV,
     )
+
+
+@router.get("/pending")
+def get_pending_intentos():
+    """
+    Devuelve todos los intentos listos para enviar:
+    - estado = 'pendiente'
+    - programado_para <= NOW()
+    - El lead NO ha respondido aún (contacto_status != 'respondio')
+
+    Usado por el Flujo B (Dispatcher) cada 30 minutos.
+    """
+    intentos = fetch_all(
+        """
+        SELECT
+            oi.id AS intento_id,
+            oi.lead_id,
+            oi.tipo,
+            oi.email_destino,
+            oi.asunto,
+            oi.cuerpo,
+            oi.matrix_id,
+            oi.programado_para
+        FROM outreach_intentos oi
+        JOIN leads_brutos lb ON lb.id = oi.lead_id
+        WHERE oi.estado = 'pendiente'
+          AND oi.programado_para <= NOW()
+          AND lb.contacto_status != 'respondio'
+        ORDER BY oi.programado_para ASC
+        """,
+        ()
+    )
+    return {
+        "intentos": [dict(i) for i in intentos] if intentos else [],
+        "total": len(intentos) if intentos else 0,
+    }
+
+
+@router.post("/mark_sent")
+def mark_sent(req: MarkSentRequest):
+    """
+    Marca un intento como enviado tras confirmación de Instantly.
+    Registra el instantly_id para correlacionar eventos futuros (bounces, replies).
+    Incrementa el contador emails_enviados en message_matrix.
+
+    Usado por el Flujo B (Dispatcher) después de cada envío exitoso.
+    """
+    intento = fetch_one(
+        "SELECT id, matrix_id FROM outreach_intentos WHERE id = %s",
+        (req.intento_id,)
+    )
+    if not intento:
+        raise HTTPException(status_code=404, detail=f"Intento {req.intento_id} no encontrado")
+
+    execute(
+        """
+        UPDATE outreach_intentos
+        SET estado = 'enviado', enviado_at = %s, instantly_id = %s
+        WHERE id = %s
+        """,
+        (datetime.utcnow(), req.instantly_id, req.intento_id)
+    )
+
+    # Incrementar contador en la versión de matrix usada
+    if intento['matrix_id']:
+        increment_sent(intento['matrix_id'])
+
+    return {"status": "ok", "intento_id": req.intento_id, "instantly_id": req.instantly_id}
 
 
 @router.post("/cascade", response_model=CascadeResponse)

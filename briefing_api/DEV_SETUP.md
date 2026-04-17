@@ -18,17 +18,20 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configurar credenciales
+### 4. Configurar variables de entorno
 ```powershell
 copy .env.example .env
 notepad .env
 ```
-Completar con los valores reales (ver credenciales en Coolify o DBeaver):
+Completar `.env` con:
 ```
 ENVIRONMENT=development
 API_PORT=8002
 DATABASE_URL=postgresql://usuario:password@187.77.234.205:5432/nombre_db
 API_KEY=sediment-dev-2026
+DEV_EMAIL_OVERRIDE=tomas@sedimentdata.com   ← tu correo real
+TWENTY_API_URL=http://187.77.234.205:8347
+TWENTY_API_TOKEN=                            ← dejar vacío en dev
 ```
 
 ---
@@ -41,19 +44,67 @@ venv\Scripts\activate
 uvicorn main:app --reload --port 8002
 ```
 
-Swagger UI disponible en: http://localhost:8002/docs
+Swagger UI disponible en: **http://localhost:8002/docs**
 
 Para detener: **Ctrl+C** en la terminal.
 
 ---
 
-## Notas importantes
+## Garantías de seguridad en modo development
 
-- `ENVIRONMENT=development` → el endpoint `/outreach/prepare` NO escribe en la BD (dry-run seguro)
-- `ENVIRONMENT=production` → escribe en la BD real (solo en Coolify)
-- El archivo `.env` nunca se sube a GitHub (está en `.gitignore`)
-- La BD es siempre la real en Coolify — no hay BD local separada
-- El `--reload` reinicia automáticamente cuando cambiás archivos `.py`, pero NO cuando cambiás `.env` → para eso hacé Ctrl+C y volvé a correr
+| Riesgo | Protección |
+|---|---|
+| Escribir intentos reales en la BD | `ENVIRONMENT=development` → dry-run, no escribe en `outreach_intentos` |
+| Enviar email a un prospecto real | `DEV_EMAIL_OVERRIDE` → todos los emails se redirigen a tu correo |
+| Crear leads en Twenty CRM | Solo se ejecuta si `ENVIRONMENT=production` |
+| Subir credenciales al repo | `.env` está en `.gitignore`, nunca se sube |
+
+**Con estas protecciones puedes testear cualquier flujo desde n8n → briefing_api sin riesgo de contactar a nadie ni corromper datos de producción.**
+
+La respuesta del endpoint en dev incluye:
+- `is_dry_run: true`
+- `email_destino`: tu correo (override)
+- `email_real`: el email del lead real (para verificar que el cascade funciona)
+
+---
+
+## Leads de prueba en la BD
+
+Para testear sin depender de leads reales, ejecutar este SQL en DBeaver:
+
+```sql
+-- Leads dummy para desarrollo — no tocar en producción
+INSERT INTO leads_brutos (
+    timestamp_levante, fuente, nombre, ciudad, pais,
+    vertical_consolidada, stack_categoria, stack_score,
+    score, emails_sitio, email_fuente, web_url,
+    contacto_status, enrichment_status, sheets_exported
+) VALUES
+(NOW(), 'dev_test', 'Clínica Demo Salud', 'Bogotá', 'Colombia',
+ 'salud', 'ecommerce', 40,
+ 78, 'contacto@clinica-demo.co', 'admin@clinica-demo.co', 'https://clinica-demo.co',
+ 'pendiente', 'done', FALSE),
+
+(NOW(), 'dev_test', 'Manufactura Demo SAS', 'Medellín', 'Colombia',
+ 'manufactura', 'erp', 20,
+ 72, 'ventas@manufactura-demo.com', NULL, 'https://manufactura-demo.com',
+ 'pendiente', 'done', FALSE),
+
+(NOW(), 'dev_test', 'Retail Demo Ltda', 'Cali', 'Colombia',
+ 'retail', 'analytics', 25,
+ 68, 'info@retaildemo.co', NULL, 'https://retaildemo.co',
+ 'pendiente', 'done', FALSE);
+
+-- Verificar
+SELECT id, nombre, vertical_consolidada, stack_categoria, score, contacto_status
+FROM leads_brutos
+WHERE fuente = 'dev_test';
+```
+
+Para limpiar los leads de prueba después:
+```sql
+DELETE FROM leads_brutos WHERE fuente = 'dev_test';
+```
 
 ---
 
@@ -64,3 +115,20 @@ git add .
 git commit -m "descripción del cambio"
 git push
 ```
+
+Coolify hace redeploy automático al detectar el push (si está configurado el webhook de GitHub).
+
+---
+
+## Variables de entorno en Coolify (producción)
+
+Ir a Coolify → Servicio `briefing_api` → Environment Variables y verificar:
+
+| Variable | Valor |
+|---|---|
+| `ENVIRONMENT` | `production` |
+| `DATABASE_URL` | URL real de PostgreSQL |
+| `API_KEY` | Clave compartida con n8n |
+| `DEV_EMAIL_OVERRIDE` | *(vacío)* |
+| `TWENTY_API_URL` | `http://187.77.234.205:8347` |
+| `TWENTY_API_TOKEN` | Token generado en Twenty → Settings → API |

@@ -45,16 +45,19 @@ def prepare_outreach(req: PrepareRequest):
     )
     if not cascade:
         # Actualizar status y rechazar
-        execute(
-            "UPDATE leads_brutos SET contacto_status = 'sin_contacto' WHERE id = %s",
-            (req.lead_id,)
-        )
+        if not IS_DEV:
+            execute(
+                "UPDATE leads_brutos SET contacto_status = 'sin_contacto' WHERE id = %s",
+                (req.lead_id,)
+            )
         raise HTTPException(
             status_code=422,
             detail=f"Lead {req.lead_id} no tiene emails válidos. Marcado como sin_contacto."
         )
 
-    email_destino = cascade[0]
+    email_real = cascade[0]
+    # DEV SAFETY: si hay dev_email_override, redirigir todos los envíos a esa dirección
+    email_destino = settings.dev_email_override if (IS_DEV and settings.dev_email_override) else email_real
 
     # 3. Seleccionar mensaje de la matriz
     vertical = lead['vertical_consolidada'] or 'sin_clasificar'
@@ -73,6 +76,7 @@ def prepare_outreach(req: PrepareRequest):
     asunto_final = build_subject(msg['asunto'], empresa)
 
     # 5. Registrar intento en BD (solo en producción)
+    send_at = req.programado_para or datetime.utcnow()
     intento_id = -1
     if not IS_DEV:
         result = execute(
@@ -83,7 +87,7 @@ def prepare_outreach(req: PrepareRequest):
             RETURNING id
             """,
             (req.lead_id, msg['id'], req.tipo, email_destino,
-             asunto_final, cuerpo_final, datetime.utcnow())
+             asunto_final, cuerpo_final, send_at)
         )
         intento_id = result['id']
 
@@ -102,10 +106,12 @@ def prepare_outreach(req: PrepareRequest):
         lead_id=req.lead_id,
         intento_id=intento_id,
         email_destino=email_destino,
+        email_real=email_real if (IS_DEV and settings.dev_email_override) else None,
         asunto=asunto_final,
         cuerpo=cuerpo_final,
         matrix_id=msg['id'],
         tipo=req.tipo,
+        programado_para=send_at,
         is_dry_run=IS_DEV,
     )
 

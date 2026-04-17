@@ -86,8 +86,32 @@ def handle_instantly_webhook(payload: InstantlyWebhook, x_api_key: Optional[str]
             "UPDATE leads_brutos SET contacto_status = 'respondio' WHERE id = %s",
             (lead_id,)
         )
+        # Cancelar todos los intentos pendientes de este lead (no enviar seguimiento)
+        execute(
+            """
+            UPDATE outreach_intentos
+            SET estado = 'cancelado'
+            WHERE lead_id = %s AND estado = 'pendiente'
+            """,
+            (lead_id,)
+        )
         # Incrementar contador de respuestas en la matriz
         if intento['matrix_id']:
             increment_replied(intento['matrix_id'])
+
+        # Crear registro en Twenty CRM (solo en producción)
+        if settings.environment == "production":
+            try:
+                import httpx as _httpx
+                _httpx.post(
+                    f"http://localhost:{settings.api_port}/twenty/create_lead_record",
+                    json={"lead_id": lead_id, "intento_id": intento_id},
+                    headers={"X-API-Key": settings.api_key},
+                    timeout=10.0,
+                )
+            except Exception as e:
+                # No bloquear el webhook si Twenty falla — loguear y seguir
+                import logging
+                logging.getLogger(__name__).error(f"Error creando lead en Twenty: {e}")
 
     return {"status": "ok", "event_type": payload.event_type, "intento_id": intento_id}

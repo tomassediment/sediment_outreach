@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     # API security
     api_key: str = "dev-key-change-in-production"
 
+    # DEV safety — en development, todos los emails van a esta dirección
+    # Dejar vacío en producción. NUNCA subir al repo con valor real.
+    dev_email_override: str = ""
+
+    # Twenty CRM
+    twenty_api_url: str = "http://187.77.234.205:8347"
+    twenty_api_token: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

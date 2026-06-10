@@ -1,6 +1,7 @@
 import re
 from urllib.parse import urlparse
 from typing import Optional
+import dns.resolver
 
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
 IMAGE_EXTENSIONS = re.compile(r'\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|pdf)', re.IGNORECASE)
@@ -36,6 +37,14 @@ def is_valid_email(email: str) -> bool:
     return True
 
 
+def has_mx_record(domain: str) -> bool:
+    try:
+        dns.resolver.resolve(domain, 'MX')
+        return True
+    except Exception:
+        return False
+
+
 def extract_domain(web_url: str) -> Optional[str]:
     try:
         parsed = urlparse(web_url)
@@ -67,10 +76,10 @@ def build_email_cascade(emails_sitio: Optional[str], email_fuente: Optional[str]
         if is_valid_email(email) and email not in cascade:
             cascade.append(email)
 
-    # 3. Patrones genéricos del dominio (si hay web_url)
+    # 3. Patrones genéricos del dominio (solo si hay MX record)
     if web_url:
         domain = extract_domain(web_url)
-        if domain:
+        if domain and has_mx_record(domain):
             for prefix in ['info', 'contacto', 'ventas', 'comercial']:
                 generic = f"{prefix}@{domain}"
                 if generic not in cascade:

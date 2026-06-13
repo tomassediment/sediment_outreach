@@ -55,11 +55,17 @@ def extract_domain(web_url: str) -> Optional[str]:
         return None
 
 
-def build_email_cascade(emails_sitio: Optional[str], email_fuente: Optional[str], web_url: Optional[str]) -> list[str]:
+def build_email_cascade(
+    emails_sitio: Optional[str],
+    email_fuente: Optional[str],
+    web_url: Optional[str],
+    mx_records: Optional[str] = None,
+) -> list[str]:
     """
     Construye la lista ordenada de emails a intentar para un lead.
     Orden: emails_sitio → email_fuente (si distinto) → patrones genéricos del dominio
     Filtra emails inválidos en cada paso.
+    mx_records: valor ya calculado en BD ('TRUE'/'FALSE'). Si None, hace lookup en vivo.
     """
     cascade = []
 
@@ -79,11 +85,16 @@ def build_email_cascade(emails_sitio: Optional[str], email_fuente: Optional[str]
     # 3. Patrones genéricos del dominio (solo si hay MX record)
     if web_url:
         domain = extract_domain(web_url)
-        if domain and has_mx_record(domain):
-            for prefix in ['info', 'contacto', 'ventas', 'comercial']:
-                generic = f"{prefix}@{domain}"
-                if generic not in cascade:
-                    cascade.append(generic)
+        if domain:
+            if mx_records is not None:
+                domain_has_mx = mx_records == 'TRUE'
+            else:
+                domain_has_mx = has_mx_record(domain)
+            if domain_has_mx:
+                for prefix in ['info', 'contacto', 'ventas', 'comercial']:
+                    generic = f"{prefix}@{domain}"
+                    if generic not in cascade:
+                        cascade.append(generic)
 
     return cascade
 

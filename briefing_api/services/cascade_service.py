@@ -8,7 +8,7 @@ def get_lead_cascade(lead_id: int) -> list[str]:
     Construye el cascade completo de emails para un lead dado su ID.
     """
     lead = fetch_one(
-        "SELECT emails_sitio, email_fuente, web_url FROM leads_brutos WHERE id = %s",
+        "SELECT emails_sitio, email_fuente, web_url, mx_records FROM leads_brutos WHERE id = %s",
         (lead_id,)
     )
     if not lead:
@@ -18,6 +18,7 @@ def get_lead_cascade(lead_id: int) -> list[str]:
         emails_sitio=lead['emails_sitio'],
         email_fuente=lead['email_fuente'],
         web_url=lead['web_url'],
+        mx_records=lead['mx_records'],
     )
 
 

@@ -98,6 +98,7 @@ def discover_web_extended(batch_size: int = Query(default=10, ge=1, le=50)):
           AND (emails_sitio IS NULL OR emails_sitio = '')
           AND (email_fuente IS NULL OR email_fuente = '')
           AND contacto_status = 'pendiente'
+          AND email_enrich_tried_at IS NULL
         ORDER BY score DESC NULLS LAST, stack_score DESC NULLS LAST
         LIMIT %s
         """,
@@ -113,14 +114,20 @@ def discover_web_extended(batch_size: int = Query(default=10, ge=1, le=50)):
     for lead in candidatos:
         lead_dict = dict(lead)
         email = enrich_lead(lead_dict)
+
         if email:
             found += 1
             result = execute(
-                "UPDATE leads_brutos SET emails_sitio = %s WHERE id = %s RETURNING id",
+                "UPDATE leads_brutos SET emails_sitio = %s, email_enrich_tried_at = NOW() WHERE id = %s RETURNING id",
                 (email, lead_dict['id'])
             )
             if result:
                 updated += 1
+        else:
+            execute(
+                "UPDATE leads_brutos SET email_enrich_tried_at = NOW() WHERE id = %s",
+                (lead_dict['id'],)
+            )
 
     return {
         "processed": len(candidatos),

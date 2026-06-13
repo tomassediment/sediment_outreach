@@ -35,6 +35,7 @@ def enrichment_debug():
         "snov_client_secret": "SET" if settings.snov_client_secret else "EMPTY",
         "zerobounce_api_key": "SET" if settings.zerobounce_api_key else "EMPTY",
         "abstract_api_key": "SET" if settings.abstract_api_key else "EMPTY",
+        "prospeo_api_key": "SET" if settings.prospeo_api_key else "EMPTY",
     }
 
     # 2. Quota

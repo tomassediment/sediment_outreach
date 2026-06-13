@@ -10,10 +10,18 @@ from services.email_validator import is_valid_email, extract_domain
 settings = get_settings()
 
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+MAILTO_RE = re.compile(r'mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})', re.IGNORECASE)
+SCHEMA_RE = re.compile(r'"email"\s*:\s*"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"', re.IGNORECASE)
 SCRAPE_TIMEOUT = 8.0
 API_TIMEOUT = 10.0
 
-CONTACT_PATHS = ['/contacto', '/contact', '/contactenos', '/contactus', '/nosotros', '/about']
+CONTACT_PATHS = [
+    '/contacto', '/contact', '/contactenos', '/contactus',
+    '/nosotros', '/about', '/quienes-somos', '/empresa',
+    '/equipo', '/acerca-de', '/acerca', '/team',
+]
+
+WHOIS_TIMEOUT = 6.0
 
 
 # ── Quota ────────────────────────────────────────────────────────────────────
@@ -39,13 +47,47 @@ def _increment_quota(servicio: str):
 # ── Scraping ─────────────────────────────────────────────────────────────────
 
 def _extract_emails_from_html(html: str, domain: str) -> list[str]:
-    found = EMAIL_RE.findall(html)
     result = []
-    for e in found:
+
+    # Prioridad 1: mailto: links — más confiables
+    for e in MAILTO_RE.findall(html):
         e = e.lower()
         if is_valid_email(e) and domain in e and e not in result:
             result.append(e)
+
+    # Prioridad 2: schema.org structured data
+    for e in SCHEMA_RE.findall(html):
+        e = e.lower()
+        if is_valid_email(e) and domain in e and e not in result:
+            result.append(e)
+
+    # Prioridad 3: regex general sobre el texto
+    for e in EMAIL_RE.findall(html):
+        e = e.lower()
+        if is_valid_email(e) and domain in e and e not in result:
+            result.append(e)
+
     return result
+
+
+def _find_contact_links(html: str, base_url: str) -> list[str]:
+    """Extrae hrefs internos que parezcan páginas de contacto."""
+    LINK_RE = re.compile(r'href=["\']([^"\']*)["\']', re.IGNORECASE)
+    CONTACT_KEYWORDS = re.compile(r'contact|contacto|nosotros|about|empresa|equipo|acerca', re.IGNORECASE)
+    found = []
+    for href in LINK_RE.findall(html):
+        if CONTACT_KEYWORDS.search(href):
+            if href.startswith('http'):
+                url = href
+            elif href.startswith('/'):
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                url = f"{parsed.scheme}://{parsed.netloc}{href}"
+            else:
+                continue
+            if url not in found:
+                found.append(url)
+    return found[:5]
 
 
 def scrape_contact_emails(web_url: str) -> list[str]:
@@ -59,7 +101,8 @@ def scrape_contact_emails(web_url: str) -> list[str]:
     emails = []
 
     with httpx.Client(timeout=SCRAPE_TIMEOUT, follow_redirects=True,
-                      headers={'User-Agent': 'Mozilla/5.0'}) as client:
+                      headers={'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'}) as client:
+        # Primera pasada: rutas conocidas
         for url in pages:
             if url in seen_urls:
                 continue
@@ -67,15 +110,85 @@ def scrape_contact_emails(web_url: str) -> list[str]:
             try:
                 r = client.get(url)
                 if r.status_code == 200:
-                    for e in _extract_emails_from_html(r.text, domain):
+                    found = _extract_emails_from_html(r.text, domain)
+                    for e in found:
                         if e not in emails:
                             emails.append(e)
+                    # Si aún no encontramos nada en la home, buscar links internos de contacto
+                    if not emails and url == base:
+                        for contact_url in _find_contact_links(r.text, base):
+                            if contact_url not in seen_urls:
+                                pages.append(contact_url)
                     if emails:
                         break
             except Exception:
                 continue
 
     return emails
+
+
+# ── WHOIS lookup ──────────────────────────────────────────────────────────────
+
+def whois_lookup(domain: str) -> list[str]:
+    """Busca emails en datos WHOIS del dominio via API gratuita."""
+    try:
+        r = httpx.get(
+            f'https://www.whoisxmlapi.com/whoisserver/WhoisService',
+            params={'apiKey': 'at_free', 'domainName': domain, 'outputFormat': 'JSON'},
+            timeout=WHOIS_TIMEOUT,
+        )
+        if r.status_code == 200:
+            text = r.text
+            found = EMAIL_RE.findall(text)
+            result = []
+            for e in found:
+                e = e.lower()
+                # Filtrar emails de whoisxmlapi.com y dominios de registro
+                if is_valid_email(e) and domain in e and e not in result:
+                    result.append(e)
+            return result
+    except Exception:
+        pass
+
+    # Fallback: whoisjson.com
+    try:
+        r = httpx.get(f'https://whoisjson.com/api/v1/whois?domain={domain}', timeout=WHOIS_TIMEOUT)
+        if r.status_code == 200:
+            text = r.text
+            found = EMAIL_RE.findall(text)
+            result = []
+            for e in found:
+                e = e.lower()
+                if is_valid_email(e) and domain in e and e not in result:
+                    result.append(e)
+            return result
+    except Exception:
+        pass
+
+    return []
+
+
+# ── Prospeo ──────────────────────────────────────────────────────────────────
+
+def prospeo_domain_search(domain: str) -> list[str]:
+    if not settings.prospeo_api_key or not _quota_ok('prospeo'):
+        return []
+    try:
+        r = httpx.get(
+            'https://api.prospeo.io/domain-search',
+            params={'domain': domain},
+            headers={'X-KEY': settings.prospeo_api_key},
+            timeout=API_TIMEOUT,
+        )
+        if r.status_code == 200:
+            _increment_quota('prospeo')
+            emails = [e.get('email') for e in r.json().get('response', {}).get('emails', []) if e.get('email')]
+            return [e for e in emails if is_valid_email(e)]
+        if r.status_code == 429:
+            execute("UPDATE enrichment_quota SET usados=limite WHERE servicio='prospeo'", ())
+    except Exception:
+        pass
+    return []
 
 
 # ── Hunter.io ────────────────────────────────────────────────────────────────
@@ -209,12 +322,13 @@ def verify_email(email: str) -> Optional[bool]:
 def enrich_lead(lead: dict) -> Optional[str]:
     """
     Corre el pipeline completo para un lead.
-    Retorna el email encontrado y verificado, o None si no encontró nada útil.
+    Orden: scraping → WHOIS → Hunter → Snov → verificación.
+    Retorna el primer email encontrado y no inválido, o None.
     """
     web_url = lead.get('web_url', '')
     domain = extract_domain(web_url) if web_url else None
 
-    # 1. Scraping
+    # 1. Scraping mejorado (gratis, ilimitado)
     if web_url:
         scraped = scrape_contact_emails(web_url)
         if scraped:
@@ -223,18 +337,32 @@ def enrich_lead(lead: dict) -> Optional[str]:
     if not domain:
         return None
 
-    # 2. Hunter
+    # 2. WHOIS lookup (gratis, ilimitado)
+    whois_emails = whois_lookup(domain)
+    if whois_emails:
+        return whois_emails[0]
+
+    # 3. Hunter
     hunter_emails = hunter_domain_search(domain)
     for email in hunter_emails:
         result = verify_email(email)
         if result is True:
             return email
         if result is None:
-            return email  # sin verificar, pero encontrado — mejor que nada
+            return email
 
-    # 3. Snov
+    # 4. Snov
     snov_emails = snov_domain_search(domain)
     for email in snov_emails:
+        result = verify_email(email)
+        if result is True:
+            return email
+        if result is None:
+            return email
+
+    # 5. Prospeo
+    prospeo_emails = prospeo_domain_search(domain)
+    for email in prospeo_emails:
         result = verify_email(email)
         if result is True:
             return email

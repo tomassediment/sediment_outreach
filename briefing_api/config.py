@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     snov_client_secret: str = ""
     zerobounce_api_key: str = ""
     abstract_api_key: str = ""
+    prospeo_api_key: str = ""
 
     class Config:
         env_file = ".env"

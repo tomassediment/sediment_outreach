@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     twenty_api_url: str = "http://187.77.234.205:8347"
     twenty_api_token: str = ""
 
+    # Enrichment APIs
+    hunter_api_key: str = ""
+    snov_client_id: str = ""
+    snov_client_secret: str = ""
+    zerobounce_api_key: str = ""
+    abstract_api_key: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

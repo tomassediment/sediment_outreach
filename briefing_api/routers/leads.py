@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Query
-from typing import Optional
 
-from database import fetch_all
+from database import fetch_all, execute
 from services.email_validator import build_email_cascade
+from services.enrichment_service import enrich_lead
 
 router = APIRouter()
 
@@ -79,4 +79,51 @@ def batch_for_outreach(
         "total": len(leads_validos),
         "vertical": vertical,
         "min_score": min_score,
+    }
+
+
+@router.post("/discover-web-extended")
+def discover_web_extended(batch_size: int = Query(default=10, ge=1, le=50)):
+    """
+    Pipeline de enriquecimiento de emails.
+    Toma leads sin email con MX válido y corre: scraping → Hunter → Snov → ZeroBounce/Abstract.
+    Actualiza emails_sitio en leads_brutos si encuentra algo.
+    Llamado por Flujo 2.1 cada 10 minutos.
+    """
+    candidatos = fetch_all(
+        """
+        SELECT id, web_url, score, stack_score
+        FROM leads_brutos
+        WHERE mx_records = 'TRUE'
+          AND (emails_sitio IS NULL OR emails_sitio = '')
+          AND (email_fuente IS NULL OR email_fuente = '')
+          AND contacto_status = 'pendiente'
+        ORDER BY score DESC NULLS LAST, stack_score DESC NULLS LAST
+        LIMIT %s
+        """,
+        (batch_size,)
+    )
+
+    if not candidatos:
+        return {"processed": 0, "found": 0, "updated": 0}
+
+    found = 0
+    updated = 0
+
+    for lead in candidatos:
+        lead_dict = dict(lead)
+        email = enrich_lead(lead_dict)
+        if email:
+            found += 1
+            result = execute(
+                "UPDATE leads_brutos SET emails_sitio = %s WHERE id = %s RETURNING id",
+                (email, lead_dict['id'])
+            )
+            if result:
+                updated += 1
+
+    return {
+        "processed": len(candidatos),
+        "found": found,
+        "updated": updated,
     }

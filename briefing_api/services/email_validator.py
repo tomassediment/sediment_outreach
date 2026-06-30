@@ -1,6 +1,6 @@
 import re
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, Callable
 import dns.resolver
 
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
@@ -60,12 +60,16 @@ def build_email_cascade(
     email_fuente: Optional[str],
     web_url: Optional[str],
     mx_records: Optional[str] = None,
+    verify_fn: Optional[Callable[[str], Optional[bool]]] = None,
 ) -> list[str]:
     """
     Construye la lista ordenada de emails a intentar para un lead.
     Orden: emails_sitio → email_fuente (si distinto) → patrones genéricos del dominio
     Filtra emails inválidos en cada paso.
     mx_records: valor ya calculado en BD ('TRUE'/'FALSE'). Si None, hace lookup en vivo.
+    verify_fn: función opcional (email) -> Optional[bool]. Si se provee, solo agrega
+               genéricos que retornen True o None (catch-all). Si quota agotada (retorna None),
+               el genérico se descarta (conservative fallback).
     """
     cascade = []
 
@@ -94,7 +98,16 @@ def build_email_cascade(
                 for prefix in ['info', 'contacto', 'ventas', 'comercial']:
                     generic = f"{prefix}@{domain}"
                     if generic not in cascade:
-                        cascade.append(generic)
+                        if verify_fn is not None:
+                            result = verify_fn(generic)
+                            # True = válido, None = catch-all (aceptar), False = inválido (descartar)
+                            # Si verify_fn no puede verificar (quota agotada), retorna None —
+                            # aquí usamos conservative fallback: NO agregar el genérico
+                            if result is True:
+                                cascade.append(generic)
+                            # result is None o False → no agregar
+                        else:
+                            cascade.append(generic)
 
     return cascade
 

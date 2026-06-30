@@ -12,6 +12,8 @@ settings = get_settings()
 EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
 MAILTO_RE = re.compile(r'mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})', re.IGNORECASE)
 SCHEMA_RE = re.compile(r'"email"\s*:\s*"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"', re.IGNORECASE)
+
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif', '.ico', '.avif', '.bmp', '.pdf')
 SCRAPE_TIMEOUT = 8.0
 API_TIMEOUT = 10.0
 
@@ -46,25 +48,30 @@ def _increment_quota(servicio: str):
 
 # ── Scraping ─────────────────────────────────────────────────────────────────
 
+def _is_image_email(email: str) -> bool:
+    local = email.split('@')[0].lower()
+    return any(local.endswith(ext) or email.lower().endswith(ext) for ext in IMAGE_EXTS)
+
+
 def _extract_emails_from_html(html: str, domain: str) -> list[str]:
     result = []
 
     # Prioridad 1: mailto: links — más confiables
     for e in MAILTO_RE.findall(html):
         e = e.lower()
-        if is_valid_email(e) and domain in e and e not in result:
+        if not _is_image_email(e) and is_valid_email(e) and domain in e and e not in result:
             result.append(e)
 
     # Prioridad 2: schema.org structured data
     for e in SCHEMA_RE.findall(html):
         e = e.lower()
-        if is_valid_email(e) and domain in e and e not in result:
+        if not _is_image_email(e) and is_valid_email(e) and domain in e and e not in result:
             result.append(e)
 
     # Prioridad 3: regex general sobre el texto
     for e in EMAIL_RE.findall(html):
         e = e.lower()
-        if is_valid_email(e) and domain in e and e not in result:
+        if not _is_image_email(e) and is_valid_email(e) and domain in e and e not in result:
             result.append(e)
 
     return result

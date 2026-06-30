@@ -10,11 +10,16 @@ from services.email_validator import build_email_cascade
 from services.matrix_selector import get_message, increment_sent
 from services.email_builder import build_email, build_subject
 from services.cascade_service import get_next_email
+from services.enrichment_service import verify_zerobounce
 
 
 class MarkSentRequest(BaseModel):
     intento_id: int
-    instantly_id: str
+    instantly_id: Optional[str] = None  # deprecated — era para Instantly. Opcional post-migración a Gmail API.
+
+
+class MarkBouncesRequest(BaseModel):
+    email_destinos: list[str]  # lista de emails que hicieron bounce según Gmail
 
 router = APIRouter()
 settings = get_settings()
@@ -49,6 +54,7 @@ def prepare_outreach(req: PrepareRequest):
         emails_sitio=lead['emails_sitio'],
         email_fuente=lead['email_fuente'],
         web_url=lead['web_url'],
+        verify_fn=verify_zerobounce,
     )
     if not cascade:
         # Actualizar status y rechazar
@@ -181,7 +187,7 @@ def mark_sent(req: MarkSentRequest):
         SET estado = 'enviado', enviado_at = %s, instantly_id = %s
         WHERE id = %s
         """,
-        (datetime.utcnow(), req.instantly_id, req.intento_id)
+        (datetime.utcnow(), req.instantly_id or '', req.intento_id)
     )
 
     # Incrementar contador en la versión de matrix usada
@@ -220,6 +226,53 @@ def handle_bounce_cascade(req: CascadeRequest):
         hay_siguiente=siguiente is not None,
         razon=razon,
     )
+
+
+@router.post("/mark_bounces")
+def mark_bounces(req: MarkBouncesRequest):
+    """
+    Recibe una lista de emails que hicieron bounce según Gmail.
+    Marca los intentos correspondientes como bounce_hard en outreach_intentos.
+    Usado por el flujo nocturno de auditoría (Flujo C extendido o Flujo 6).
+    """
+    if not req.email_destinos:
+        return {"status": "ok", "marcados": 0}
+
+    marcados = 0
+    ahora = datetime.utcnow()
+
+    for email in req.email_destinos:
+        result = execute(
+            """
+            UPDATE outreach_intentos
+            SET estado = 'bounce_hard', bounce_at = %s
+            WHERE email_destino = %s
+              AND estado = 'enviado'
+              AND bounce_at IS NULL
+            """,
+            (ahora, email.strip().lower())
+        )
+        # También marcar leads sin_contacto si todos sus intentos son bounce
+        execute(
+            """
+            UPDATE leads_brutos
+            SET contacto_status = 'sin_contacto'
+            WHERE id IN (
+                SELECT DISTINCT lead_id
+                FROM outreach_intentos
+                WHERE email_destino = %s
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM outreach_intentos
+                WHERE lead_id = leads_brutos.id
+                  AND estado NOT IN ('bounce_hard', 'sin_contacto')
+            )
+            """,
+            (email.strip().lower(),)
+        )
+        marcados += 1
+
+    return {"status": "ok", "marcados": marcados, "procesados": len(req.email_destinos)}
 
 
 @router.get("/lead/{lead_id}/status")

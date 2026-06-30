@@ -1,11 +1,14 @@
 from typing import Optional
 from database import fetch_one, fetch_all
 from services.email_validator import build_email_cascade, next_email_in_cascade
+from services.enrichment_service import verify_zerobounce
 
 
 def get_lead_cascade(lead_id: int) -> list[str]:
     """
     Construye el cascade completo de emails para un lead dado su ID.
+    Los genéricos (info@, contacto@, etc.) solo se incluyen si ZeroBounce los confirma.
+    Si ZeroBounce no tiene quota, los genéricos se descartan (conservative fallback).
     """
     lead = fetch_one(
         "SELECT emails_sitio, email_fuente, web_url, mx_records FROM leads_brutos WHERE id = %s",
@@ -19,6 +22,7 @@ def get_lead_cascade(lead_id: int) -> list[str]:
         email_fuente=lead['email_fuente'],
         web_url=lead['web_url'],
         mx_records=lead['mx_records'],
+        verify_fn=verify_zerobounce,
     )
 
 

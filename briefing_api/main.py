@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routers import health, matrix, outreach, webhooks, leads, analytics, twenty
+from routers import health, matrix, outreach, webhooks, leads, analytics, twenty, apollo
 from config import get_settings
 
 settings = get_settings()
@@ -19,3 +19,4 @@ app.include_router(webhooks.router,  prefix="/webhooks",  tags=["Webhooks"])
 app.include_router(leads.router,     prefix="/leads",     tags=["Leads"])
 app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 app.include_router(twenty.router,    prefix="/twenty",    tags=["Twenty CRM"])
+app.include_router(apollo.router,    prefix="/apollo-leads", tags=["Apollo Leads"])

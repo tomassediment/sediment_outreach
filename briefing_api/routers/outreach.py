@@ -228,6 +228,84 @@ def handle_bounce_cascade(req: CascadeRequest):
     )
 
 
+@router.post("/prepare_apollo")
+def prepare_outreach_apollo(req: dict):
+    """
+    Versión de /prepare para leads Apollo.
+    Recibe apollo_lead_id + tipo + slot_1 + slot_2.
+    Construye el email combinando mensaje_intro de Apollo + cuerpo de message_matrix.
+    Registra en outreach_intentos y marca el apollo_lead como enviado.
+    """
+    apollo_lead_id = req.get("apollo_lead_id")
+    tipo = req.get("tipo", "primer_contacto")
+    slot_1 = req.get("slot_1", "")
+    slot_2 = req.get("slot_2", "")
+
+    lead = fetch_one(
+        "SELECT * FROM apollo_leads WHERE id = %s AND estado = 'pendiente'",
+        (apollo_lead_id,)
+    )
+    if not lead:
+        raise HTTPException(status_code=404, detail=f"Apollo lead {apollo_lead_id} no encontrado o ya procesado")
+
+    vertical = lead['vertical'] or 'sin_clasificar'
+    stack = lead['stack_categoria'] or 'sin_stack'
+    msg = get_message(tipo, vertical, stack)
+
+    if not msg:
+        # Fallback a plantilla genérica si no hay matrix para esa combinación
+        msg = get_message(tipo, 'sin_clasificar', 'sin_stack')
+    if not msg:
+        raise HTTPException(status_code=404, detail=f"Sin plantilla en matrix para {tipo}/{vertical}/{stack}")
+
+    empresa = lead['empresa'] or 'su empresa'
+    nombre = lead['nombre_decisor'] or ''
+    cuerpo_matrix = build_email(msg['cuerpo'], empresa, slot_1, slot_2)
+    asunto_final = build_subject(msg['asunto'], empresa)
+
+    # Armar cuerpo final: saludo con nombre + intro Gemini + cuerpo matrix
+    if nombre:
+        saludo = f"{nombre.split()[0]},"
+    else:
+        saludo = "Hola,"
+
+    intro = lead['mensaje_intro'] or ''
+    if intro:
+        cuerpo_final = f"{saludo}\n\n{intro}\n\n{cuerpo_matrix}"
+    else:
+        cuerpo_final = f"{saludo}\n\n{cuerpo_matrix}"
+
+    # Registrar en outreach_intentos (sin lead_id — apollo lead es fuente diferente)
+    ahora = datetime.utcnow()
+    result = execute(
+        """
+        INSERT INTO outreach_intentos
+            (lead_id, matrix_id, tipo, email_destino, asunto, cuerpo, estado, programado_para)
+        VALUES (NULL, %s, %s, %s, %s, %s, 'pendiente', %s)
+        RETURNING id
+        """,
+        (msg['id'], tipo, lead['email'], asunto_final, cuerpo_final, ahora)
+    )
+    intento_id = result['id']
+
+    # Marcar apollo_lead con outreach_intento_id
+    execute(
+        "UPDATE apollo_leads SET outreach_intento_id = %s, estado = 'enviado', contactado_at = %s WHERE id = %s",
+        (intento_id, ahora, apollo_lead_id)
+    )
+
+    increment_sent(msg['id'])
+
+    return {
+        "apollo_lead_id": apollo_lead_id,
+        "intento_id": intento_id,
+        "email_destino": lead['email'],
+        "asunto": asunto_final,
+        "cuerpo": cuerpo_final,
+        "matrix_id": msg['id'],
+    }
+
+
 @router.post("/mark_bounces")
 def mark_bounces(req: MarkBouncesRequest):
     """

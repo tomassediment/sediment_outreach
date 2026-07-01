@@ -269,7 +269,7 @@ def prepare_outreach_apollo(req: dict):
     else:
         saludo = "Hola,"
 
-    intro = lead['mensaje_intro'] or ''
+    intro = req.get("mensaje_intro") or lead['mensaje_intro'] or ''
     if intro:
         cuerpo_final = f"{saludo}\n\n{intro}\n\n{cuerpo_matrix}"
     else:
@@ -310,17 +310,20 @@ def prepare_outreach_apollo(req: dict):
 def mark_bounces(req: MarkBouncesRequest):
     """
     Recibe una lista de emails que hicieron bounce según Gmail.
-    Marca los intentos correspondientes como bounce_hard en outreach_intentos.
-    Usado por el flujo nocturno de auditoría (Flujo C extendido o Flujo 6).
+    1. Marca outreach_intentos como bounce_hard.
+    2. Para leads Apollo: si tiene email_secundario → crea nuevo intento; si no → sin_contacto.
     """
     if not req.email_destinos:
         return {"status": "ok", "marcados": 0}
 
     marcados = 0
+    reintentos_apollo = 0
     ahora = datetime.utcnow()
 
     for email in req.email_destinos:
-        result = execute(
+        email_clean = email.strip().lower()
+
+        execute(
             """
             UPDATE outreach_intentos
             SET estado = 'bounce_hard', bounce_at = %s
@@ -328,9 +331,50 @@ def mark_bounces(req: MarkBouncesRequest):
               AND estado = 'enviado'
               AND bounce_at IS NULL
             """,
-            (ahora, email.strip().lower())
+            (ahora, email_clean)
         )
-        # También marcar leads sin_contacto si todos sus intentos son bounce
+
+        # Cascade Apollo: buscar si este email pertenece a un apollo_lead
+        apollo_lead = fetch_one(
+            "SELECT id, email_secundario, vertical, stack_categoria, empresa, nombre_decisor FROM apollo_leads WHERE email = %s AND estado IN ('enviado', 'bounce')",
+            (email_clean,)
+        )
+        if apollo_lead:
+            execute(
+                "UPDATE apollo_leads SET estado = 'bounce' WHERE id = %s",
+                (apollo_lead['id'],)
+            )
+            if apollo_lead['email_secundario']:
+                # Crear nuevo intento con email secundario
+                vertical = apollo_lead['vertical'] or 'sin_clasificar'
+                stack = apollo_lead['stack_categoria'] or 'sin_stack'
+                msg = get_message('primer_contacto', vertical, stack)
+                if not msg:
+                    msg = get_message('primer_contacto', 'sin_clasificar', 'sin_stack')
+                if msg:
+                    empresa = apollo_lead['empresa'] or 'su empresa'
+                    cuerpo = build_email(msg['cuerpo'], empresa, '', '')
+                    asunto = build_subject(msg['asunto'], empresa)
+                    execute(
+                        """
+                        INSERT INTO outreach_intentos
+                            (lead_id, matrix_id, tipo, email_destino, asunto, cuerpo, estado, programado_para)
+                        VALUES (NULL, %s, 'primer_contacto', %s, %s, %s, 'pendiente', %s)
+                        """,
+                        (msg['id'], apollo_lead['email_secundario'], asunto, cuerpo, ahora)
+                    )
+                    execute(
+                        "UPDATE apollo_leads SET email = %s, estado = 'pendiente' WHERE id = %s",
+                        (apollo_lead['email_secundario'], apollo_lead['id'])
+                    )
+                    reintentos_apollo += 1
+            else:
+                execute(
+                    "UPDATE apollo_leads SET estado = 'sin_contacto' WHERE id = %s",
+                    (apollo_lead['id'],)
+                )
+
+        # También marcar leads_brutos sin_contacto si aplica
         execute(
             """
             UPDATE leads_brutos
@@ -338,7 +382,7 @@ def mark_bounces(req: MarkBouncesRequest):
             WHERE id IN (
                 SELECT DISTINCT lead_id
                 FROM outreach_intentos
-                WHERE email_destino = %s
+                WHERE email_destino = %s AND lead_id IS NOT NULL
             )
             AND NOT EXISTS (
                 SELECT 1 FROM outreach_intentos
@@ -346,11 +390,16 @@ def mark_bounces(req: MarkBouncesRequest):
                   AND estado NOT IN ('bounce_hard', 'sin_contacto')
             )
             """,
-            (email.strip().lower(),)
+            (email_clean,)
         )
         marcados += 1
 
-    return {"status": "ok", "marcados": marcados, "procesados": len(req.email_destinos)}
+    return {
+        "status": "ok",
+        "marcados": marcados,
+        "reintentos_apollo": reintentos_apollo,
+        "procesados": len(req.email_destinos),
+    }
 
 
 @router.get("/lead/{lead_id}/status")

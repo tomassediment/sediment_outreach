@@ -24,6 +24,7 @@ class ApolloLeadIn(BaseModel):
     tech_stack_wappalyzer: Optional[str] = None
     stack_categoria: Optional[str] = None
     mensaje_intro: Optional[str] = None
+    email_secundario: Optional[str] = None
 
 
 @router.get("/check")
@@ -59,14 +60,14 @@ def create_apollo_lead(lead: ApolloLeadIn):
         INSERT INTO apollo_leads
             (apollo_id, nombre_decisor, cargo, email, linkedin_url, empresa, dominio,
              vertical, pais, ciudad, empleados, tech_stack_apollo, tech_stack_wappalyzer,
-             stack_categoria, mensaje_intro)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             stack_categoria, mensaje_intro, email_secundario)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (apollo_id) DO NOTHING
         RETURNING id
         """,
         (lead.apollo_id, lead.nombre_decisor, lead.cargo, lead.email, lead.linkedin_url,
          lead.empresa, lead.dominio, lead.vertical, lead.pais, lead.ciudad, lead.empleados,
-         lead.tech_stack_apollo, tech_wap, stack_cat, lead.mensaje_intro)
+         lead.tech_stack_apollo, tech_wap, stack_cat, lead.mensaje_intro, lead.email_secundario)
     )
     if not result:
         return {"status": "duplicate", "apollo_id": lead.apollo_id}
@@ -84,10 +85,10 @@ def get_pending_apollo(limit: int = Query(default=10, ge=1, le=50)):
     rows = fetch_all(
         """
         SELECT id, apollo_id, nombre_decisor, cargo, email, empresa,
-               dominio, vertical, stack_categoria, mensaje_intro
+               dominio, vertical, ciudad, empleados,
+               stack_categoria, tech_stack_apollo, tech_stack_wappalyzer, mensaje_intro
         FROM apollo_leads
         WHERE estado = 'pendiente'
-          AND mensaje_intro IS NOT NULL
         ORDER BY importado_at ASC
         LIMIT %s
         """,

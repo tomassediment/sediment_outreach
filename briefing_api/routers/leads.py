@@ -1,6 +1,8 @@
+import re
+import httpx
 from fastapi import APIRouter, Query
 
-from database import fetch_all, execute
+from database import fetch_all, fetch_one, execute
 from services.email_validator import build_email_cascade
 from services.enrichment_service import enrich_lead
 
@@ -79,6 +81,118 @@ def batch_for_outreach(
         "total": len(leads_validos),
         "vertical": vertical,
         "min_score": min_score,
+    }
+
+
+_TECH_SIGNALS = [
+    (re.compile(r'shopify', re.I), 'Shopify'),
+    (re.compile(r'woocommerce', re.I), 'WooCommerce'),
+    (re.compile(r'wp-content|wordpress', re.I), 'WordPress'),
+    (re.compile(r'magento', re.I), 'Magento'),
+    (re.compile(r'vtex', re.I), 'VTEX'),
+    (re.compile(r'prestashop', re.I), 'PrestaShop'),
+    (re.compile(r'hubspot', re.I), 'HubSpot'),
+    (re.compile(r'salesforce', re.I), 'Salesforce'),
+    (re.compile(r'zoho', re.I), 'Zoho'),
+    (re.compile(r'pipedrive', re.I), 'Pipedrive'),
+    (re.compile(r'google-analytics|gtag\(', re.I), 'Google Analytics'),
+    (re.compile(r'hotjar', re.I), 'Hotjar'),
+    (re.compile(r'intercom', re.I), 'Intercom'),
+    (re.compile(r'zendesk', re.I), 'Zendesk'),
+    (re.compile(r'sap\.', re.I), 'SAP'),
+    (re.compile(r'oracle', re.I), 'Oracle'),
+    (re.compile(r'siigo', re.I), 'Siigo'),
+    (re.compile(r'aspel', re.I), 'Aspel'),
+    (re.compile(r'react', re.I), 'React'),
+    (re.compile(r'next\.js|nextjs', re.I), 'Next.js'),
+    (re.compile(r'vue\.js|vuejs', re.I), 'Vue.js'),
+    (re.compile(r'angular', re.I), 'Angular'),
+    (re.compile(r'jquery', re.I), 'jQuery'),
+    (re.compile(r'bootstrap', re.I), 'Bootstrap'),
+    (re.compile(r'cloudflare', re.I), 'Cloudflare'),
+    (re.compile(r'aws\.amazon|cloudfront', re.I), 'AWS'),
+    (re.compile(r'wix\.com|wixsite', re.I), 'Wix'),
+    (re.compile(r'squarespace', re.I), 'Squarespace'),
+    (re.compile(r'webflow', re.I), 'Webflow'),
+    (re.compile(r'stripe', re.I), 'Stripe'),
+    (re.compile(r'paypal', re.I), 'PayPal'),
+    (re.compile(r'mercadopago', re.I), 'MercadoPago'),
+    (re.compile(r'payu', re.I), 'PayU'),
+    (re.compile(r'recaptcha', re.I), 'Google reCAPTCHA'),
+]
+
+
+def _detect_tech_stack(domain: str) -> str:
+    """Detecta tech stack haciendo scraping básico del dominio."""
+    detected = []
+    try:
+        url = f"https://{domain}"
+        r = httpx.get(url, timeout=8.0, follow_redirects=True,
+                      headers={'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'})
+        if r.status_code == 200:
+            html = r.text
+            for pattern, name in _TECH_SIGNALS:
+                if pattern.search(html) and name not in detected:
+                    detected.append(name)
+    except Exception:
+        try:
+            url = f"http://{domain}"
+            r = httpx.get(url, timeout=8.0, follow_redirects=True,
+                          headers={'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'})
+            if r.status_code == 200:
+                html = r.text
+                for pattern, name in _TECH_SIGNALS:
+                    if pattern.search(html) and name not in detected:
+                        detected.append(name)
+        except Exception:
+            pass
+    return ', '.join(detected) if detected else None
+
+
+@router.get("/enrich/tech-stack")
+def get_tech_stack(domain: str = Query(..., description="Dominio a analizar, ej: empresa.com")):
+    """
+    Detecta tech stack de un dominio.
+    1. Busca en leads_brutos (caché existente).
+    2. Si no hay, hace scraping básico del dominio.
+    Usado por Flujo 5 para enriquecer leads Apollo recién descargados.
+    """
+    domain = domain.strip().lower().replace("https://", "").replace("http://", "").split("/")[0]
+
+    # Cache: buscar en leads_brutos
+    row = fetch_one(
+        "SELECT tech_stack, stack_categoria FROM leads_brutos WHERE dominio = %s AND tech_stack IS NOT NULL LIMIT 1",
+        (domain,)
+    )
+    if row and row['tech_stack']:
+        return {
+            "domain": domain,
+            "tech_stack": row['tech_stack'],
+            "stack_categoria": row['stack_categoria'],
+            "source": "leads_brutos",
+        }
+
+    # Scraping directo
+    tech_stack = _detect_tech_stack(domain)
+
+    # Clasificación básica
+    stack_cat = None
+    if tech_stack:
+        ts_lower = tech_stack.lower()
+        if any(x in ts_lower for x in ['shopify', 'woocommerce', 'vtex', 'magento', 'prestashop']):
+            stack_cat = 'ecommerce'
+        elif any(x in ts_lower for x in ['sap', 'oracle', 'siigo', 'aspel', 'erp']):
+            stack_cat = 'erp'
+        elif any(x in ts_lower for x in ['google analytics', 'hotjar', 'metabase', 'tableau', 'power bi']):
+            stack_cat = 'analytics'
+        else:
+            stack_cat = 'basico'
+
+    return {
+        "domain": domain,
+        "tech_stack": tech_stack,
+        "stack_categoria": stack_cat,
+        "source": "scraping",
     }
 
 

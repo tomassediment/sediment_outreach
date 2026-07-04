@@ -135,7 +135,7 @@ def get_pending_intentos():
     Devuelve todos los intentos listos para enviar:
     - estado = 'pendiente'
     - programado_para <= NOW()
-    - El lead NO ha respondido aún (contacto_status != 'respondio')
+    - LEFT JOIN leads_brutos: excluye leads que respondieron; Apollo (lead_id NULL) siempre pasa.
 
     Usado por el Flujo B (Dispatcher) cada 30 minutos.
     """
@@ -151,10 +151,10 @@ def get_pending_intentos():
             oi.matrix_id,
             oi.programado_para
         FROM outreach_intentos oi
-        JOIN leads_brutos lb ON lb.id = oi.lead_id
+        LEFT JOIN leads_brutos lb ON lb.id = oi.lead_id
         WHERE oi.estado = 'pendiente'
           AND oi.programado_para <= NOW()
-          AND lb.contacto_status != 'respondio'
+          AND (lb.contacto_status != 'respondio' OR oi.lead_id IS NULL)
         ORDER BY oi.programado_para ASC
         """,
         ()
@@ -232,14 +232,13 @@ def handle_bounce_cascade(req: CascadeRequest):
 def prepare_outreach_apollo(req: dict):
     """
     Versión de /prepare para leads Apollo.
-    Recibe apollo_lead_id + tipo + slot_1 + slot_2.
-    Construye el email combinando mensaje_intro de Apollo + cuerpo de message_matrix.
-    Registra en outreach_intentos y marca el apollo_lead como enviado.
+    Si recibe email_cuerpo: el cuerpo viene generado por Gemini (prompt maestro).
+    Asunto sigue saliendo de message_matrix (solo el subject, no el body).
+    Registra en outreach_intentos y actualiza el apollo_lead.
     """
     apollo_lead_id = req.get("apollo_lead_id")
     tipo = req.get("tipo", "primer_contacto")
-    slot_1 = req.get("slot_1", "")
-    slot_2 = req.get("slot_2", "")
+    email_cuerpo = req.get("email_cuerpo")
 
     lead = fetch_one(
         "SELECT * FROM apollo_leads WHERE id = %s AND estado = 'pendiente'",
@@ -248,34 +247,29 @@ def prepare_outreach_apollo(req: dict):
     if not lead:
         raise HTTPException(status_code=404, detail=f"Apollo lead {apollo_lead_id} no encontrado o ya procesado")
 
+    empresa = lead['empresa'] or 'su empresa'
     vertical = lead['vertical'] or 'sin_clasificar'
     stack = lead['stack_categoria'] or 'sin_stack'
-    msg = get_message(tipo, vertical, stack)
 
+    # Asunto: siempre desde matrix
+    msg = get_message(tipo, vertical, stack) or get_message(tipo, 'sin_clasificar', 'sin_stack')
     if not msg:
-        # Fallback a plantilla genérica si no hay matrix para esa combinación
-        msg = get_message(tipo, 'sin_clasificar', 'sin_stack')
-    if not msg:
-        raise HTTPException(status_code=404, detail=f"Sin plantilla en matrix para {tipo}/{vertical}/{stack}")
-
-    empresa = lead['empresa'] or 'su empresa'
-    nombre = lead['nombre_decisor'] or ''
-    cuerpo_matrix = build_email(msg['cuerpo'], empresa, slot_1, slot_2)
+        raise HTTPException(status_code=404, detail=f"Sin plantilla de asunto en matrix para {tipo}/{vertical}/{stack}")
     asunto_final = build_subject(msg['asunto'], empresa)
 
-    # Armar cuerpo final: saludo con nombre + intro Gemini + cuerpo matrix
-    if nombre:
-        saludo = f"{nombre.split()[0]},"
+    # Cuerpo: Gemini (email_cuerpo) o fallback a intro+matrix para retrocompatibilidad
+    if email_cuerpo and len(email_cuerpo.strip()) > 50:
+        cuerpo_final = email_cuerpo.strip()
     else:
-        saludo = "Hola,"
+        nombre = lead['nombre_decisor'] or ''
+        saludo = f"{nombre.split()[0]}," if nombre else "Hola,"
+        intro = req.get("mensaje_intro") or lead.get('mensaje_intro') or ''
+        slot_1 = req.get("slot_1", "")
+        slot_2 = req.get("slot_2", "")
+        cuerpo_matrix = build_email(msg['cuerpo'], empresa, slot_1, slot_2)
+        cuerpo_final = f"{saludo}\n\n{intro}\n\n{cuerpo_matrix}" if intro else f"{saludo}\n\n{cuerpo_matrix}"
 
-    intro = req.get("mensaje_intro") or lead['mensaje_intro'] or ''
-    if intro:
-        cuerpo_final = f"{saludo}\n\n{intro}\n\n{cuerpo_matrix}"
-    else:
-        cuerpo_final = f"{saludo}\n\n{cuerpo_matrix}"
-
-    # Registrar en outreach_intentos (sin lead_id — apollo lead es fuente diferente)
+    # Registrar en outreach_intentos (lead_id NULL — Apollo es fuente separada)
     ahora = datetime.utcnow()
     result = execute(
         """
@@ -288,12 +282,10 @@ def prepare_outreach_apollo(req: dict):
     )
     intento_id = result['id']
 
-    # Marcar apollo_lead con outreach_intento_id
     execute(
         "UPDATE apollo_leads SET outreach_intento_id = %s, estado = 'enviado', contactado_at = %s WHERE id = %s",
         (intento_id, ahora, apollo_lead_id)
     )
-
     increment_sent(msg['id'])
 
     return {

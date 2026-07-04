@@ -278,9 +278,9 @@ def enrich_apollo_batch(batch_size: int = Query(default=5, ge=1, le=20)):
             rss_url = f"https://news.google.com/rss/search?q={q}&hl=es&gl=CO&ceid=CO:es"
             r = httpx.get(rss_url, timeout=8.0, follow_redirects=True)
             if r.status_code == 200:
-                titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', r.text)
-                if len(titles) > 1:
-                    news_snippet = titles[1][:300]
+                item_titles = re.findall(r'<item>.*?<title>(.*?)</title>', r.text, re.DOTALL)
+                if item_titles:
+                    news_snippet = item_titles[0][:300]
         except Exception:
             pass
 

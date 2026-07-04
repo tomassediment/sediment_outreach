@@ -92,7 +92,7 @@ def _calc_score(tech_all: str, cargo: str, vertical: str, empleados: Optional[in
     elif empleados and int(empleados) >= 50:
         score += 10
 
-    if any(v_kw in v for v_kw in ['tecnolog', 'software', ' it', 'consultor', 'saas']):
+    if any(v_kw in v for v_kw in ['tecnolog', 'software', 'information technology', 'consultor', 'saas']):
         angulo = 'ia_first'
 
     return min(score, 100), angulo

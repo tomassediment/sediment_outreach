@@ -255,7 +255,11 @@ def prepare_outreach_apollo(req: dict):
     msg = get_message(tipo, vertical, stack) or get_message(tipo, 'sin_clasificar', 'sin_stack')
     if not msg:
         raise HTTPException(status_code=404, detail=f"Sin plantilla de asunto en matrix para {tipo}/{vertical}/{stack}")
-    asunto_final = build_subject(msg['asunto'], empresa)
+    asunto_gemini_override = req.get("asunto_gemini")
+    if asunto_gemini_override and len(asunto_gemini_override.strip()) > 10:
+        asunto_final = asunto_gemini_override.strip()
+    else:
+        asunto_final = build_subject(msg['asunto'], empresa)
 
     # Cuerpo: Gemini (email_cuerpo) o fallback a intro+matrix para retrocompatibilidad
     if email_cuerpo and len(email_cuerpo.strip()) > 50:

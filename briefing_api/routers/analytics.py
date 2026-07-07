@@ -46,23 +46,27 @@ def outreach_summary():
 @router.get("/weekly_progress")
 def weekly_progress():
     """
-    Devuelve X: cantidad de leads que ya tienen un primer_contacto enviado esta semana
-    y cuyo contacto_status NO es 'sin_contacto'.
+    Devuelve X: cantidad de intentos primer_contacto enviados esta semana,
+    contando tanto leads_brutos (excluye 'sin_contacto') como apollo_leads (lead_id NULL).
 
     Usado por el Flujo A (Planner Diario) para calcular N = min(ceil((30-X)/D), 15).
 
     'sin_contacto' se excluye porque ese lead falló el cascade completo —
     no contabiliza como contacto real, y al día siguiente el planner compensa.
+
+    Nota: el JOIN original era INNER, así que cualquier oi.lead_id NULL (todo el
+    tráfico Apollo, que es lead_id NULL por diseño) quedaba fuera del conteo y X
+    daba 0 permanentemente desde la migración a apollo_leads.
     """
     result = fetch_one(
         """
-        SELECT COUNT(DISTINCT oi.lead_id) AS x
+        SELECT COUNT(*) AS x
         FROM outreach_intentos oi
-        JOIN leads_brutos lb ON lb.id = oi.lead_id
+        LEFT JOIN leads_brutos lb ON lb.id = oi.lead_id
         WHERE oi.tipo = 'primer_contacto'
           AND oi.estado IN ('pendiente', 'enviado', 'respondio', 'bounce_hard', 'bounce_soft')
           AND oi.creado_at >= date_trunc('week', NOW())
-          AND lb.contacto_status != 'sin_contacto'
+          AND (lb.contacto_status IS DISTINCT FROM 'sin_contacto')
         """,
         ()
     )

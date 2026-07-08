@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from pydantic import BaseModel
 
@@ -228,6 +228,69 @@ def handle_bounce_cascade(req: CascadeRequest):
     )
 
 
+DAILY_CAP = 15
+BUFFER_DIAS_HABILES = 5
+MAX_POR_CORRIDA = 30  # tope de leads a generar en una sola corrida del Planner
+
+
+@router.get("/buffer_plan")
+def buffer_plan():
+    """
+    Calcula cómo repartir el batch de hoy del Planner entre los próximos
+    BUFFER_DIAS_HABILES días hábiles, para mantener un colchón de envíos
+    ya preparados y no depender de que Gemini funcione el mismo día del envío.
+
+    Recorre día hábil por día hábil desde mañana, mira cuántos intentos
+    Apollo (lead_id NULL, primer_contacto, pendiente/enviado) ya hay agendados
+    ese día y cuánto falta para llegar a DAILY_CAP. Devuelve un plan
+    [{fecha, cantidad}] a rellenar en esta corrida, hasta MAX_POR_CORRIDA leads.
+
+    Auto-reparable: si un día se saltó el Planner (Gemini caído), esa fecha
+    queda con hueco y la próxima corrida la rellena primero, antes de seguir
+    extendiendo el horizonte hacia adelante. Si el horizonte completo ya está
+    lleno, extiende un día hábil más — así el colchón crece en vez de quedarse
+    fijo en "mañana" para siempre.
+    """
+    dia = datetime.utcnow().date()
+    candidatos = []
+    while len(candidatos) < BUFFER_DIAS_HABILES:
+        dia += timedelta(days=1)
+        if dia.weekday() < 5:  # 0-4 = lunes-viernes
+            candidatos.append(dia)
+
+    plan = []
+    restante = MAX_POR_CORRIDA
+    for candidato in candidatos:
+        if restante <= 0:
+            break
+        result = fetch_one(
+            """
+            SELECT COUNT(*) AS n
+            FROM outreach_intentos
+            WHERE lead_id IS NULL AND tipo = 'primer_contacto'
+              AND estado IN ('pendiente', 'enviado')
+              AND programado_para::date = %s
+            """,
+            (candidato,)
+        )
+        ya_agendados = result['n'] if result else 0
+        faltan = DAILY_CAP - ya_agendados
+        if faltan <= 0:
+            continue
+        tomar = min(faltan, restante)
+        plan.append({"fecha": candidato.isoformat(), "cantidad": tomar})
+        restante -= tomar
+
+    if not plan:
+        # Horizonte completo — extender un día hábil más para seguir creciendo el colchón
+        extra = candidatos[-1] + timedelta(days=1)
+        while extra.weekday() >= 5:
+            extra += timedelta(days=1)
+        plan.append({"fecha": extra.isoformat(), "cantidad": min(DAILY_CAP, MAX_POR_CORRIDA)})
+
+    return {"plan": plan, "total_a_generar": sum(p["cantidad"] for p in plan)}
+
+
 @router.post("/prepare_apollo")
 def prepare_outreach_apollo(req: dict):
     """
@@ -235,10 +298,15 @@ def prepare_outreach_apollo(req: dict):
     Si recibe email_cuerpo: el cuerpo viene generado por Gemini (prompt maestro).
     Asunto sigue saliendo de message_matrix (solo el subject, no el body).
     Registra en outreach_intentos y actualiza el apollo_lead.
+
+    programado_para (opcional): fecha/hora ISO a la que debe agendarse el envío
+    (buffer multi-día). Si no viene, se agenda para ahora mismo (comportamiento
+    previo, retrocompatible).
     """
     apollo_lead_id = req.get("apollo_lead_id")
     tipo = req.get("tipo", "primer_contacto")
     email_cuerpo = req.get("email_cuerpo")
+    programado_para_raw = req.get("programado_para")
 
     lead = fetch_one(
         "SELECT * FROM apollo_leads WHERE id = %s AND estado = 'pendiente'",
@@ -275,6 +343,10 @@ def prepare_outreach_apollo(req: dict):
 
     # Registrar en outreach_intentos (lead_id NULL — Apollo es fuente separada)
     ahora = datetime.utcnow()
+    try:
+        programado_para = datetime.fromisoformat(programado_para_raw) if programado_para_raw else ahora
+    except ValueError:
+        programado_para = ahora
     result = execute(
         """
         INSERT INTO outreach_intentos
@@ -282,7 +354,7 @@ def prepare_outreach_apollo(req: dict):
         VALUES (NULL, %s, %s, %s, %s, %s, 'pendiente', %s)
         RETURNING id
         """,
-        (msg['id'], tipo, lead['email'], asunto_final, cuerpo_final, ahora)
+        (msg['id'], tipo, lead['email'], asunto_final, cuerpo_final, programado_para)
     )
     intento_id = result['id']
 

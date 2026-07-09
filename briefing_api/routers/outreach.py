@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional
 from pydantic import BaseModel
+import httpx
 
 from config import get_settings
 from database import fetch_one, fetch_all, execute
@@ -232,37 +233,79 @@ DAILY_CAP = 15
 BUFFER_DIAS_HABILES = 5
 MAX_POR_CORRIDA = 30  # tope de leads a generar en una sola corrida del Planner
 
+# Países reales en apollo_leads (verificado contra la BD 2026-07-09) → código Nager.Date
+PAIS_A_CODIGO = {
+    'colombia': 'CO', 'mexico': 'MX', 'méxico': 'MX', 'chile': 'CL',
+    'argentina': 'AR', 'peru': 'PE', 'perú': 'PE', 'ecuador': 'EC',
+    'uruguay': 'UY', 'panama': 'PA', 'panamá': 'PA', 'guatemala': 'GT',
+    'costa rica': 'CR', 'paraguay': 'PY', 'bolivia': 'BO', 'united states': 'US',
+}
 
-@router.get("/buffer_plan")
-def buffer_plan():
+
+def _festivos_por_pais(anios: set[int]) -> dict:
     """
-    Calcula cómo repartir el batch de hoy del Planner entre los próximos
-    BUFFER_DIAS_HABILES días hábiles, para mantener un colchón de envíos
-    ya preparados y no depender de que Gemini funcione el mismo día del envío.
-
-    Recorre día hábil por día hábil desde mañana, mira cuántos intentos
-    Apollo (lead_id NULL, primer_contacto, pendiente/enviado) ya hay agendados
-    ese día y cuánto falta para llegar a DAILY_CAP. Devuelve un plan
-    [{fecha, cantidad}] a rellenar en esta corrida, hasta MAX_POR_CORRIDA leads.
-
-    Auto-reparable: si un día se saltó el Planner (Gemini caído), esa fecha
-    queda con hueco y la próxima corrida la rellena primero, antes de seguir
-    extendiendo el horizonte hacia adelante. Si el horizonte completo ya está
-    lleno, extiende un día hábil más — así el colchón crece en vez de quedarse
-    fijo en "mañana" para siempre.
+    Devuelve {codigo_pais: set(fechas festivas 'YYYY-MM-DD')} consultando
+    Nager.Date una vez por país/año (fail-open: si la API falla para un país,
+    se asume sin festivos conocidos ese año — no bloquea el pipeline).
     """
-    dia = datetime.utcnow().date()
+    codigos = set(PAIS_A_CODIGO.values())
+    resultado = {c: set() for c in codigos}
+    for anio in anios:
+        for codigo in codigos:
+            try:
+                resp = httpx.get(
+                    f"https://date.nager.at/api/v3/PublicHolidays/{anio}/{codigo}",
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                resultado[codigo].update(h["date"] for h in resp.json())
+            except Exception:
+                pass
+    return resultado
+
+
+@router.get("/planner_batch")
+def planner_batch():
+    """
+    Reemplaza /outreach/buffer_plan + /apollo-leads/pending para Outreach A.
+    Devuelve el batch completo ya armado: cada lead viene con su
+    programado_para asignado, respetando festivos por país (Nager.Date,
+    por lead — no un solo país para todos) y el cap diario DAILY_CAP,
+    manteniendo un colchón de BUFFER_DIAS_HABILES días hábiles.
+
+    Por qué toda la asignación vive acá y no en n8n: así se puede probar
+    contra la BD real sin depender de ejecutar el workflow, y evita que un
+    festivo en un país bloquee el envío a leads de otro país ese mismo día.
+
+    Días candidatos: los próximos BUFFER_DIAS_HABILES días hábiles (lunes-
+    viernes) a partir de mañana. Si TODOS los países están festivos un día
+    candidato, ese día se descarta por completo (no se cuenta como parte
+    del horizonte). Auto-reparable igual que el diseño anterior: si un día
+    quedó con hueco por una corrida fallida, la siguiente corrida lo rellena
+    primero antes de extender el horizonte hacia adelante.
+    """
+    hoy = datetime.utcnow().date()
+    anios = {hoy.year, (hoy + timedelta(days=BUFFER_DIAS_HABILES * 3)).year}
+    festivos = _festivos_por_pais(anios)
+
+    dia = hoy
     candidatos = []
-    while len(candidatos) < BUFFER_DIAS_HABILES:
+    intentos_dia = 0
+    while len(candidatos) < BUFFER_DIAS_HABILES and intentos_dia < 30:
         dia += timedelta(days=1)
-        if dia.weekday() < 5:  # 0-4 = lunes-viernes
-            candidatos.append(dia)
+        intentos_dia += 1
+        if dia.weekday() >= 5:
+            continue
+        fecha_str = dia.isoformat()
+        paises_habiles = {c for c, fechas in festivos.items() if fecha_str not in fechas}
+        if not paises_habiles:
+            continue  # festivo en TODOS los países conocidos — día inválido, no cuenta
+        candidatos.append(dia)
 
-    plan = []
-    restante = MAX_POR_CORRIDA
+    dias_plan = []
     for candidato in candidatos:
-        if restante <= 0:
-            break
+        fecha_str = candidato.isoformat()
+        paises_habiles = {c for c, fechas in festivos.items() if fecha_str not in fechas}
         result = fetch_one(
             """
             SELECT COUNT(*) AS n
@@ -274,21 +317,56 @@ def buffer_plan():
             (candidato,)
         )
         ya_agendados = result['n'] if result else 0
-        faltan = DAILY_CAP - ya_agendados
-        if faltan <= 0:
+        cupo = DAILY_CAP - ya_agendados
+        if cupo <= 0:
             continue
-        tomar = min(faltan, restante)
-        plan.append({"fecha": candidato.isoformat(), "cantidad": tomar})
-        restante -= tomar
+        dias_plan.append({"fecha": candidato, "cupo": cupo, "paises": paises_habiles})
 
-    if not plan:
-        # Horizonte completo — extender un día hábil más para seguir creciendo el colchón
-        extra = candidatos[-1] + timedelta(days=1)
+    if not dias_plan:
+        extra = candidatos[-1] + timedelta(days=1) if candidatos else hoy + timedelta(days=1)
         while extra.weekday() >= 5:
             extra += timedelta(days=1)
-        plan.append({"fecha": extra.isoformat(), "cantidad": min(DAILY_CAP, MAX_POR_CORRIDA)})
+        fecha_str = extra.isoformat()
+        paises_habiles = {c for c, fechas in festivos.items() if fecha_str not in fechas} or set(PAIS_A_CODIGO.values())
+        dias_plan.append({"fecha": extra, "cupo": min(DAILY_CAP, MAX_POR_CORRIDA), "paises": paises_habiles})
 
-    return {"plan": plan, "total_a_generar": sum(p["cantidad"] for p in plan)}
+    # Traer candidatos de sobra para poder repartir por país sin quedarnos cortos
+    pendientes = fetch_all(
+        """
+        SELECT id, apollo_id, nombre_decisor, cargo, email, empresa, vertical,
+               pais, ciudad, empleados, stack_categoria, tech_stack_apollo,
+               tech_stack_wappalyzer, company_brief, news_snippet, apollo_score_angulo
+        FROM apollo_leads WHERE estado = 'pendiente' LIMIT 500
+        """,
+        ()
+    )
+
+    asignados = []
+    sin_dia_habil = 0
+    restante_total = MAX_POR_CORRIDA
+    for lead in pendientes:
+        if restante_total <= 0:
+            break
+        codigo = PAIS_A_CODIGO.get((lead.get('pais') or 'colombia').strip().lower())
+        if not codigo:
+            continue
+        destino = next((d for d in dias_plan if d['cupo'] > 0 and codigo in d['paises']), None)
+        if not destino:
+            sin_dia_habil += 1
+            continue
+        destino['cupo'] -= 1
+        restante_total -= 1
+        programado = datetime.combine(destino['fecha'], datetime.min.time()).replace(hour=14, minute=0)
+        lead_dict = dict(lead)
+        lead_dict['programado_para'] = programado.isoformat()
+        asignados.append(lead_dict)
+
+    return {
+        "leads": asignados,
+        "total": len(asignados),
+        "sin_dia_habil_disponible": sin_dia_habil,
+        "dias_considerados": [d["fecha"].isoformat() for d in dias_plan],
+    }
 
 
 @router.post("/prepare_apollo")
